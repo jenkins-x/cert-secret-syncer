@@ -4,23 +4,17 @@
 
 selectorLabels:
   app: cert-secret-syncer
-
 replicaCount: 1
-
 metrics:
   port: 8080
-
 health:
   port: 8081
-
 image:
-  repository: jkassis/cert-secret-syncer
+  repository: ghcr.io/jenkins-x/cert-secret-syncer
   pullPolicy: Always
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "latest"
-
+  tag: "0.0.4"
 fullnameOverride: "cert-secret-syncer"
-
 serviceAccount:
   # Specifies whether a service account should be created
   create: true
@@ -30,22 +24,18 @@ serviceAccount:
   # The name of the service account to use.
   # If not set and create is true, a name is generated using the fullname template
   name: ""
-
-
 resources: {}
-  # We usually recommend not to specify default resources and to leave this as a conscious
-  # choice for the user. This also increases chances charts run on environments with little
-  # resources, such as Minikube. If you do want to specify resources, uncomment the following
-  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
-  # limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  # requests:
-  #   cpu: 100m
-  #   memory: 128Mi
+# We usually recommend not to specify default resources and to leave this as a conscious
+# choice for the user. This also increases chances charts run on environments with little
+# resources, such as Minikube. If you do want to specify resources, uncomment the following
+# lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+# limits:
+#   cpu: 100m
+#   memory: 128Mi
+# requests:
+#   cpu: 100m
+#   memory: 128Mi
 
 nodeSelector: {}
-
 tolerations: []
-
 affinity: {}
