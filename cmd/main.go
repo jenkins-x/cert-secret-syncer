@@ -139,7 +139,7 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 		// Handle other backends
 	}
 
-	return ctrl.Result{RequeueAfter: time.Minute}, nil
+	return ctrl.Result{}, nil
 }
 
 func (r *SecretSyncer) ingressesGetByLabels(ctx context.Context, labelSet map[string]string) (*networkingv1.IngressList, error) {
