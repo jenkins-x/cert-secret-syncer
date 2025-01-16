@@ -14,8 +14,8 @@ health:
   port: 8081
 
 image:
-  repository: jkassis/cert-secret-syncer
-  pullPolicy: Always
+  repository: ghcr.io/jenkins-x/cert-secret-syncer
+  pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: "latest"
 
