@@ -1,7 +1,6 @@
 apiVersion: tekton.dev/v1beta1
 kind: PipelineRun
 metadata:
-  creationTimestamp: null
   name: pullrequest
 spec:
   pipelineSpec:
@@ -27,13 +26,8 @@ spec:
             requests:
               cpu: 400m
               memory: 600Mi
-        - image: golang:1.21
-          name: build-make-linux
+        - name: build-make-linux
           resources: {}
-          script: |
-            #!/bin/bash
-            source .jx/variables.sh
-            make linux
         - name: check-registry
           resources: {}
         - name: build-container-build
