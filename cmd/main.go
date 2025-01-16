@@ -53,32 +53,28 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 		return ctrl.Result{}, nil
 	}
 
+	logger.Info("reconciling secret")
+
+	// Read certificate and key
+	cert, ok := secret.Data["tls.crt"]
+	if !ok {
+		return ctrl.Result{}, fmt.Errorf("cert not found in secret data")
+	}
+	certs, err := splitPEMCertificates(cert)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("could not split certs: %v", err)
+	}
+
+	key, ok := secret.Data["tls.key"]
+	if !ok {
+		return ctrl.Result{}, fmt.Errorf("key not found in secret data")
+	}
+
+	// Get certificate arn to update
+	certificateArn := secret.Annotations["alb.ingress.kubernetes.io/certificate-arn"]
+
 	switch backend {
 	case "ACM":
-		logger.Info("reconciling secret with AWS Certificate Manager backend")
-
-		// Read certificate and key
-		var certs [][]byte
-		var key []byte
-		{
-			cert, ok := secret.Data["tls.crt"]
-			if !ok {
-				return ctrl.Result{}, fmt.Errorf("cert not found in secret data")
-			}
-			certs, err = splitPEMCertificates(cert)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("could not split certs: %v", err)
-			}
-
-			key, ok = secret.Data["tls.key"]
-			if !ok {
-				return ctrl.Result{}, fmt.Errorf("key not found in secret data")
-			}
-		}
-
-		// Get certificate arn to update
-		certificateArn := secret.Annotations["alb.ingress.kubernetes.io/certificate-arn"]
-
 		// Import certificate to ACM
 		logger.Info("importing cert to ACM")
 
@@ -96,16 +92,6 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 		output, err := awsAcmSvc.ImportCertificate(importCertInput)
 		if err != nil {
 			return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("failed to import the certificate: %v", err)
-		}
-
-		// is this is the first import?
-		if certificateArn == "" {
-			// yes... save the ARN on the secret
-			secret.Annotations["alb.ingress.kubernetes.io/certificate-arn"] = *output.CertificateArn
-			err = r.Update(ctx, secret)
-			if err != nil {
-				return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("failed to update the secret: %v", err)
-			}
 		}
 
 		certificateArn = *output.CertificateArn
@@ -133,6 +119,15 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 		}
 
 		// Handle other backends
+	}
+	// is this is the first import?
+	if secret.Annotations["alb.ingress.kubernetes.io/certificate-arn"] == "" {
+		// yes... save the ARN on the secret
+		secret.Annotations["alb.ingress.kubernetes.io/certificate-arn"] = certificateArn
+		err = r.Update(ctx, secret)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update the secret: %v", err)
+		}
 	}
 
 	return ctrl.Result{}, nil
