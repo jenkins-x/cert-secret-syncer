@@ -8,3 +8,5 @@ image:
   pullPolicy: "Always"
 
 clusterRBAC: false
+
+onlyNamespace: '{{ requiredEnv "PREVIEW_NAMESPACE" }}'

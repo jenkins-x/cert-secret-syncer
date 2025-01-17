@@ -238,9 +238,14 @@ func main() {
 	err = networkingv1.AddToScheme(scheme)
 	check(err)
 
+	var namespaces map[string]cache.Config
+	if os.Getenv("ONLY_NAMESPACE") != "" {
+		namespaces = make(map[string]cache.Config)
+		namespaces[os.Getenv("ONLY_NAMESPACE")] = cache.Config{}
+	}
 	// Set up the controller manager to cache only Secrets
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Cache:                  cache.Options{ByObject: map[client.Object]cache.ByObject{&corev1.Secret{}: {}}},
+		Cache:                  cache.Options{ByObject: map[client.Object]cache.ByObject{&corev1.Secret{}: {Namespaces: namespaces}}},
 		HealthProbeBindAddress: "0.0.0.0:8081",
 		Metrics:                metricsserver.Options{BindAddress: "0.0.0.0:8080"},
 		Scheme:                 scheme,

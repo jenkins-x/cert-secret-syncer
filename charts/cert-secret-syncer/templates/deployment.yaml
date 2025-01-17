@@ -46,6 +46,11 @@ spec:
             httpGet:
               path: /healthz
               port: health
+        {{- with .Values.onlyNamespace }}
+          env:
+          - name: ONLY_NAMESPACE
+            value: {{ . }}
+        {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}
