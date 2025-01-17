@@ -57,6 +57,12 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 		return ctrl.Result{}, nil
 	}
 
+	// Get certificate arn to update
+	certificateArn := secret.Annotations[certificateArnAnnotation]
+	if certificateArn != "" {
+		logger = logger.WithValues("certificateArn", certificateArn)
+	}
+
 	logger.Info("reconciling secret")
 
 	// Read certificate and key
@@ -74,9 +80,6 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 		return ctrl.Result{}, fmt.Errorf("key not found in secret data")
 	}
 
-	// Get certificate arn to update
-	certificateArn := secret.Annotations[certificateArnAnnotation]
-
 	switch backend {
 	case "ACM":
 		if certificateArn != "" {
@@ -87,7 +90,7 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 				&acm.ListTagsForCertificateInput{CertificateArn: &certificateArn},
 			)
 			if err != nil {
-				logger.Error(err, "failed to list tags for certificate", "CertificateArn", certificateArn)
+				logger.Error(err, "failed to list tags for certificate")
 			}
 			for _, tag := range tags.Tags {
 				if *tag.Key == revisionKey {
