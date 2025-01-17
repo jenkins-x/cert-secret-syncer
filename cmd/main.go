@@ -91,14 +91,15 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 			)
 			if err != nil {
 				logger.Error(err, "failed to list tags for certificate")
-			}
-			for _, tag := range tags.Tags {
-				if *tag.Key == revisionKey {
-					if *tag.Value == secret.ResourceVersion {
-						logger.Info("secret is already imported")
-						return ctrl.Result{}, nil
+			} else {
+				for _, tag := range tags.Tags {
+					if *tag.Key == revisionKey {
+						if *tag.Value == secret.ResourceVersion {
+							logger.Info("secret is already imported")
+							return ctrl.Result{}, nil
+						}
+						break
 					}
-					break
 				}
 			}
 
@@ -126,7 +127,7 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 
 		output, err := awsAcmSvc.ImportCertificateWithContext(ctx, importCertInput)
 		if err != nil {
-			logger.Error(err, "failed to add tags to certificate", "CertificateArn", certificateArn)
+			return ctrl.Result{}, fmt.Errorf("failed to import the certificate: %v", err)
 		}
 
 		if certificateArn != "" {
@@ -135,7 +136,7 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 				Tags:           tags,
 			})
 			if err != nil {
-				return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("failed to import the certificate: %v", err)
+				logger.Error(err, "failed to add tags to certificate")
 			}
 		}
 		certificateArn = *output.CertificateArn
@@ -145,13 +146,13 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 		if ok {
 			ingressLabels, err := r.labelStringParse(ingressLabelsAsString)
 			if err != nil {
-				return ctrl.Result{RequeueAfter: time.Minute},
+				return ctrl.Result{},
 					fmt.Errorf("failed to parse ingress labels '%s': %v", ingressLabelsAsString, err)
 			}
 
 			ingresses, err := r.ingressesGetByLabels(ctx, ingressLabels)
 			if err != nil {
-				return ctrl.Result{RequeueAfter: time.Minute},
+				return ctrl.Result{},
 					fmt.Errorf("ingresses not found by labels '%s': %v", ingressLabelsAsString, err)
 			}
 
@@ -159,7 +160,7 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 				ingress.Annotations[certificateArnAnnotation] = certificateArn
 				err = r.Update(ctx, &ingress)
 				if err != nil {
-					return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("failed to update ingress: %v", err)
+					return ctrl.Result{}, fmt.Errorf("failed to update ingress: %v", err)
 				}
 			}
 		}
