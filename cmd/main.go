@@ -31,6 +31,10 @@ type SecretSyncer struct {
 	client.Client
 }
 
+var revisionKey = "cert-secret-syncer/secret-revision"
+
+const certificateArnAnnotation = "alb.ingress.kubernetes.io/certificate-arn"
+
 var awsAcmSvc *acm.ACM
 
 func init() {
@@ -71,16 +75,43 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 	}
 
 	// Get certificate arn to update
-	certificateArn := secret.Annotations["alb.ingress.kubernetes.io/certificate-arn"]
+	certificateArn := secret.Annotations[certificateArnAnnotation]
 
 	switch backend {
 	case "ACM":
+		if certificateArn != "" {
+			logger.Info("checking whether secret needs to be imported")
+
+			tags, err := awsAcmSvc.ListTagsForCertificateWithContext(
+				ctx,
+				&acm.ListTagsForCertificateInput{CertificateArn: &certificateArn},
+			)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			for _, tag := range tags.Tags {
+				if *tag.Key == revisionKey {
+					if *tag.Value == secret.ResourceVersion {
+						logger.Info("secret is already imported")
+						return ctrl.Result{}, nil
+					}
+					break
+				}
+			}
+
+		}
+
 		// Import certificate to ACM
 		logger.Info("importing cert to ACM")
+		tags := make([]*acm.Tag, 0)
+
+		tags = append(tags, &acm.Tag{Key: &revisionKey, Value: &secret.ResourceVersion})
+		// TODO: Support setting more tags
 
 		importCertInput := &acm.ImportCertificateInput{
 			Certificate: certs[0],
 			PrivateKey:  key,
+			Tags:        tags,
 		}
 		if certificateArn != "" {
 			importCertInput.CertificateArn = &certificateArn
@@ -101,16 +132,18 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 		if ok {
 			ingressLabels, err := r.labelStringParse(ingressLabelsAsString)
 			if err != nil {
-				return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("failed to parse ingress labels '%s': %v", ingressLabelsAsString, err)
+				return ctrl.Result{RequeueAfter: time.Minute},
+					fmt.Errorf("failed to parse ingress labels '%s': %v", ingressLabelsAsString, err)
 			}
 
 			ingresses, err := r.ingressesGetByLabels(ctx, ingressLabels)
 			if err != nil {
-				return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("ingresses not found by labels '%s': %v", ingressLabelsAsString, err)
+				return ctrl.Result{RequeueAfter: time.Minute},
+					fmt.Errorf("ingresses not found by labels '%s': %v", ingressLabelsAsString, err)
 			}
 
 			for _, ingress := range ingresses.Items {
-				ingress.Annotations["alb.ingress.kubernetes.io/certificate-arn"] = certificateArn
+				ingress.Annotations[certificateArnAnnotation] = certificateArn
 				err = r.Update(ctx, &ingress)
 				if err != nil {
 					return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("failed to update ingress: %v", err)
@@ -121,9 +154,9 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 		// Handle other backends
 	}
 	// is this is the first import?
-	if secret.Annotations["alb.ingress.kubernetes.io/certificate-arn"] == "" {
+	if secret.Annotations[certificateArnAnnotation] == "" {
 		// yes... save the ARN on the secret
-		secret.Annotations["alb.ingress.kubernetes.io/certificate-arn"] = certificateArn
+		secret.Annotations[certificateArnAnnotation] = certificateArn
 		err = r.Update(ctx, secret)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to update the secret: %v", err)
@@ -133,7 +166,10 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 	return ctrl.Result{}, nil
 }
 
-func (r *SecretSyncer) ingressesGetByLabels(ctx context.Context, labelSet map[string]string) (*networkingv1.IngressList, error) {
+func (r *SecretSyncer) ingressesGetByLabels(
+	ctx context.Context,
+	labelSet map[string]string,
+) (*networkingv1.IngressList, error) {
 	listOpts := &client.ListOptions{
 		LabelSelector: labels.Set(labelSet).AsSelector(),
 	}
