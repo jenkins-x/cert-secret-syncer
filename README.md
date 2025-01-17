@@ -33,7 +33,11 @@ resource "aws_iam_policy" "cert-secret-syncer_policy" {
     "Statement": [
         {
             "Effect": "Allow",
-            "Action": "acm:ImportCertificate",
+            "Action": [
+                    "acm:ImportCertificate",
+                    "acm:ListTagsForCertificate",
+                    "acm:AddTagsToCertificate"
+            ],
             "Resource": "*"
         }
     ]
