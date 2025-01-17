@@ -87,7 +87,7 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 				&acm.ListTagsForCertificateInput{CertificateArn: &certificateArn},
 			)
 			if err != nil {
-				return ctrl.Result{}, err
+				logger.Error(err, "failed to list tags for certificate", "CertificateArn", certificateArn)
 			}
 			for _, tag := range tags.Tags {
 				if *tag.Key == revisionKey {
@@ -103,28 +103,38 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 
 		// Import certificate to ACM
 		logger.Info("importing cert to ACM")
-		tags := make([]*acm.Tag, 0)
-
-		tags = append(tags, &acm.Tag{Key: &revisionKey, Value: &secret.ResourceVersion})
+		tags := []*acm.Tag{{Key: &revisionKey, Value: &secret.ResourceVersion}}
 		// TODO: Support setting more tags
 
 		importCertInput := &acm.ImportCertificateInput{
 			Certificate: certs[0],
 			PrivateKey:  key,
-			Tags:        tags,
 		}
+
 		if certificateArn != "" {
 			importCertInput.CertificateArn = &certificateArn
+		} else {
+			// Setting tags only supported during initial import
+			importCertInput.Tags = tags
 		}
 		if len(certs) > 1 {
 			importCertInput.CertificateChain = appendByteSlices(certs[1:])
 		}
 
-		output, err := awsAcmSvc.ImportCertificate(importCertInput)
+		output, err := awsAcmSvc.ImportCertificateWithContext(ctx, importCertInput)
 		if err != nil {
-			return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("failed to import the certificate: %v", err)
+			logger.Error(err, "failed to add tags to certificate", "CertificateArn", certificateArn)
 		}
 
+		if certificateArn != "" {
+			_, err := awsAcmSvc.AddTagsToCertificateWithContext(ctx, &acm.AddTagsToCertificateInput{
+				CertificateArn: &certificateArn,
+				Tags:           tags,
+			})
+			if err != nil {
+				return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("failed to import the certificate: %v", err)
+			}
+		}
 		certificateArn = *output.CertificateArn
 
 		// update the ingress with the certificate-arn
