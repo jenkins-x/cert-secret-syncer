@@ -9,7 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/acm"
-	"jkassis.com/cert-secret-syncer/util"
+	"github.com/jenkins-x/cert-secret-syncer/util"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -31,6 +31,10 @@ type SecretSyncer struct {
 	client.Client
 }
 
+var revisionKey = "cert-secret-syncer/secret-revision"
+
+const certificateArnAnnotation = "alb.ingress.kubernetes.io/certificate-arn"
+
 var awsAcmSvc *acm.ACM
 
 func init() {
@@ -50,99 +54,136 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 	// Check annotations
 	backend, ok := secret.Annotations["cert-secret-syncer/backend"]
 	if !ok {
-		return ctrl.Result{RequeueAfter: time.Minute}, nil
+		return ctrl.Result{}, nil
+	}
+
+	// Get certificate arn to update
+	certificateArn := secret.Annotations[certificateArnAnnotation]
+	if certificateArn != "" {
+		logger = logger.WithValues("certificateArn", certificateArn)
+	}
+
+	logger.Info("reconciling secret")
+
+	// Read certificate and key
+	cert, ok := secret.Data["tls.crt"]
+	if !ok {
+		return ctrl.Result{}, fmt.Errorf("cert not found in secret data")
+	}
+	certs, err := splitPEMCertificates(cert)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("could not split certs: %v", err)
+	}
+
+	key, ok := secret.Data["tls.key"]
+	if !ok {
+		return ctrl.Result{}, fmt.Errorf("key not found in secret data")
 	}
 
 	switch backend {
 	case "ACM":
-		logger.Info("reconciling secret with AWS Certificate Manager backend")
+		if certificateArn != "" {
+			logger.Info("checking whether secret needs to be imported")
 
-		// Read certificate and key
-		var certs [][]byte
-		var key []byte
-		{
-			cert, ok := secret.Data["tls.crt"]
-			if !ok {
-				return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("cert not found in secret data")
-			}
-			certs, err = splitPEMCertificates(cert)
+			tags, err := awsAcmSvc.ListTagsForCertificateWithContext(
+				ctx,
+				&acm.ListTagsForCertificateInput{CertificateArn: &certificateArn},
+			)
 			if err != nil {
-				return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("could not split certs: %v", err)
+				logger.Error(err, "failed to list tags for certificate")
+			} else {
+				for _, tag := range tags.Tags {
+					if *tag.Key == revisionKey {
+						if *tag.Value == secret.ResourceVersion {
+							logger.Info("secret is already imported")
+							return ctrl.Result{}, nil
+						}
+						break
+					}
+				}
 			}
 
-			key, ok = secret.Data["tls.key"]
-			if !ok {
-				return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("key not found in secret data")
-			}
 		}
-
-		// Get certificate arn to update
-		certificateArn := secret.Annotations["alb.ingress.kubernetes.io/certificate-arn"]
 
 		// Import certificate to ACM
-		{
-			logger.Info("importing cert to ACM")
+		logger.Info("importing cert to ACM")
+		tags := []*acm.Tag{{Key: &revisionKey, Value: &secret.ResourceVersion}}
+		// TODO: Support setting more tags
 
-			importCertInput := &acm.ImportCertificateInput{
-				Certificate: certs[0],
-				PrivateKey:  key,
-			}
-			if certificateArn != "" {
-				importCertInput.CertificateArn = &certificateArn
-			}
-			if len(certs) > 1 {
-				importCertInput.CertificateChain = appendByteSlices(certs[1:])
-			}
-
-			output, err := awsAcmSvc.ImportCertificate(importCertInput)
-			if err != nil {
-				return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("failed to import the certificate: %v", err)
-			}
-
-			// is this is the first import?
-			if certificateArn == "" {
-				// yes... save the ARN on the secret
-				secret.Annotations["alb.ingress.kubernetes.io/certificate-arn"] = *output.CertificateArn
-				err = r.Update(ctx, secret)
-				if err != nil {
-					return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("failed to update the secret: %v", err)
-				}
-			}
-
-			certificateArn = *output.CertificateArn
+		importCertInput := &acm.ImportCertificateInput{
+			Certificate: certs[0],
+			PrivateKey:  key,
 		}
 
+		if certificateArn != "" {
+			importCertInput.CertificateArn = &certificateArn
+		} else {
+			// Setting tags only supported during initial import
+			importCertInput.Tags = tags
+		}
+		if len(certs) > 1 {
+			importCertInput.CertificateChain = appendByteSlices(certs[1:])
+		}
+
+		output, err := awsAcmSvc.ImportCertificateWithContext(ctx, importCertInput)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to import the certificate: %v", err)
+		}
+
+		if certificateArn != "" {
+			_, err := awsAcmSvc.AddTagsToCertificateWithContext(ctx, &acm.AddTagsToCertificateInput{
+				CertificateArn: &certificateArn,
+				Tags:           tags,
+			})
+			if err != nil {
+				logger.Error(err, "failed to add tags to certificate")
+			}
+		}
+		certificateArn = *output.CertificateArn
+
 		// update the ingress with the certificate-arn
-		{
-			ingressLabelsAsString, ok := secret.Annotations["cert-secret-syncer/ingress-labels"]
-			if ok {
-				ingressLabels, err := r.labelStringParse(ingressLabelsAsString)
-				if err != nil {
-					return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("failed to parse ingress labels '%s': %v", ingressLabelsAsString, err)
-				}
+		ingressLabelsAsString, ok := secret.Annotations["cert-secret-syncer/ingress-labels"]
+		if ok {
+			ingressLabels, err := r.labelStringParse(ingressLabelsAsString)
+			if err != nil {
+				return ctrl.Result{},
+					fmt.Errorf("failed to parse ingress labels '%s': %v", ingressLabelsAsString, err)
+			}
 
-				ingresses, err := r.ingressesGetByLabels(ctx, ingressLabels)
-				if err != nil {
-					return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("ingresses not found by labels '%s': %v", ingressLabelsAsString, err)
-				}
+			ingresses, err := r.ingressesGetByLabels(ctx, ingressLabels)
+			if err != nil {
+				return ctrl.Result{},
+					fmt.Errorf("ingresses not found by labels '%s': %v", ingressLabelsAsString, err)
+			}
 
-				for _, ingress := range ingresses.Items {
-					ingress.Annotations["alb.ingress.kubernetes.io/certificate-arn"] = certificateArn
-					err = r.Update(ctx, &ingress)
-					if err != nil {
-						return ctrl.Result{RequeueAfter: time.Minute}, fmt.Errorf("failed to update ingress: %v", err)
-					}
+			for _, ingress := range ingresses.Items {
+				ingress.Annotations[certificateArnAnnotation] = certificateArn
+				err = r.Update(ctx, &ingress)
+				if err != nil {
+					return ctrl.Result{}, fmt.Errorf("failed to update ingress: %v", err)
 				}
 			}
 		}
 
 		// Handle other backends
 	}
+	// is this is the first import?
+	if secret.Annotations[certificateArnAnnotation] == "" {
+		// yes... save the ARN on the secret
+		secret.Annotations[certificateArnAnnotation] = certificateArn
+		err = r.Update(ctx, secret)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update the secret: %v", err)
+		}
+	}
 
 	return ctrl.Result{}, nil
 }
 
-func (r *SecretSyncer) ingressesGetByLabels(ctx context.Context, labelSet map[string]string) (*networkingv1.IngressList, error) {
+func (r *SecretSyncer) ingressesGetByLabels(
+	ctx context.Context,
+	labelSet map[string]string,
+) (*networkingv1.IngressList, error) {
 	listOpts := &client.ListOptions{
 		LabelSelector: labels.Set(labelSet).AsSelector(),
 	}
@@ -201,9 +242,14 @@ func main() {
 	err = networkingv1.AddToScheme(scheme)
 	check(err)
 
+	var namespaces map[string]cache.Config
+	if os.Getenv("ONLY_NAMESPACE") != "" {
+		namespaces = make(map[string]cache.Config)
+		namespaces[os.Getenv("ONLY_NAMESPACE")] = cache.Config{}
+	}
 	// Set up the controller manager to cache only Secrets
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Cache:                  cache.Options{ByObject: map[client.Object]cache.ByObject{&corev1.Secret{}: {}}},
+		Cache:                  cache.Options{ByObject: map[client.Object]cache.ByObject{&corev1.Secret{}: {Namespaces: namespaces}}},
 		HealthProbeBindAddress: "0.0.0.0:8081",
 		Metrics:                metricsserver.Options{BindAddress: "0.0.0.0:8080"},
 		Scheme:                 scheme,
@@ -224,7 +270,7 @@ func main() {
 	check(err)
 
 	// have the controller watch secrets on the manager's cache
-	err = c.Watch(source.Kind(mgr.GetCache(), &corev1.Secret{}), &handler.EnqueueRequestForObject{})
+	err = c.Watch(source.Kind(mgr.GetCache(), &corev1.Secret{}, &handler.TypedEnqueueRequestForObject[*corev1.Secret]{}))
 	check(err)
 
 	// start all controllers under the manager

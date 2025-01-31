@@ -1,0 +1,28 @@
+# Binaries for programs and plugins
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary, build with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+debug
+
+.idea/
+*.iml
+
+.vscode/
+
+#Various temporary created while building/running jx.
+/build/
+
+
+# vim swap files
+*.swp
+
+#OSX system files.
+**/.DS_Store

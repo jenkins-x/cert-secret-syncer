@@ -1,5 +1,5 @@
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: {{if .Values.clusterRBAC}}Cluster{{end}}Role
 metadata:
   name: {{ include "..serviceAccountName" . }}
 rules:
@@ -13,7 +13,7 @@ rules:
 ---
 
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: {{if .Values.clusterRBAC}}Cluster{{end}}RoleBinding
 metadata:
   name: {{ include "..serviceAccountName" . }}
 subjects:
@@ -21,6 +21,6 @@ subjects:
   name: {{ include "..serviceAccountName" . }}
   namespace: {{ .Release.Namespace }}
 roleRef:
-  kind: ClusterRole
+  kind: {{if .Values.clusterRBAC}}Cluster{{end}}Role
   name: {{ include "..serviceAccountName" . }}
   apiGroup: rbac.authorization.k8s.io
