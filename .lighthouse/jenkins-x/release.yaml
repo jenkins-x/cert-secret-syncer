@@ -29,7 +29,7 @@ spec:
             requests:
               cpu: 400m
               memory: 600Mi
-        - image: golang:1.21
+        - image: golang:1.23
           name: build-make-linux
           resources: {}
           script: |
