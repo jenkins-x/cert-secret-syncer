@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/acm"
+	"github.com/go-logr/logr"
 	"github.com/jenkins-x/cert-secret-syncer/util"
 
 	corev1 "k8s.io/api/core/v1"
@@ -80,6 +81,7 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 		return ctrl.Result{}, fmt.Errorf("key not found in secret data")
 	}
 
+	secretImported := false
 	switch backend {
 	case "ACM":
 		if certificateArn != "" {
@@ -96,7 +98,7 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 					if *tag.Key == revisionKey {
 						if *tag.Value == secret.ResourceVersion {
 							logger.Info("secret is already imported")
-							return ctrl.Result{}, nil
+							secretImported = true
 						}
 						break
 					}
@@ -104,43 +106,12 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 			}
 
 		}
-
-		// Import certificate to ACM
-		logger.Info("importing cert to ACM")
-		tags := []*acm.Tag{{Key: &revisionKey, Value: &secret.ResourceVersion}}
-		// TODO: Support setting more tags
-
-		importCertInput := &acm.ImportCertificateInput{
-			Certificate: certs[0],
-			PrivateKey:  key,
-		}
-
-		if certificateArn != "" {
-			importCertInput.CertificateArn = &certificateArn
-		} else {
-			// Setting tags only supported during initial import
-			importCertInput.Tags = tags
-		}
-		if len(certs) > 1 {
-			importCertInput.CertificateChain = appendByteSlices(certs[1:])
-		}
-
-		output, err := awsAcmSvc.ImportCertificateWithContext(ctx, importCertInput)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to import the certificate: %v", err)
-		}
-
-		if certificateArn != "" {
-			_, err := awsAcmSvc.AddTagsToCertificateWithContext(ctx, &acm.AddTagsToCertificateInput{
-				CertificateArn: &certificateArn,
-				Tags:           tags,
-			})
+		if !secretImported {
+			certificateArn, err = importSecretToACM(ctx, logger, secret, certs, key, certificateArn)
 			if err != nil {
-				logger.Error(err, "failed to add tags to certificate")
+				return ctrl.Result{}, err
 			}
 		}
-		certificateArn = *output.CertificateArn
-
 		// update the ingress with the certificate-arn
 		ingressLabelsAsString, ok := secret.Annotations["cert-secret-syncer/ingress-labels"]
 		if ok {
@@ -157,10 +128,12 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 			}
 
 			for _, ingress := range ingresses.Items {
-				ingress.Annotations[certificateArnAnnotation] = certificateArn
-				err = r.Update(ctx, &ingress)
-				if err != nil {
-					return ctrl.Result{}, fmt.Errorf("failed to update ingress: %v", err)
+				if ingress.Annotations[certificateArnAnnotation] != certificateArn {
+					ingress.Annotations[certificateArnAnnotation] = certificateArn
+					err = r.Update(ctx, &ingress)
+					if err != nil {
+						return ctrl.Result{}, fmt.Errorf("failed to update ingress: %v", err)
+					}
 				}
 			}
 		}
@@ -178,6 +151,52 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func importSecretToACM(
+	ctx context.Context,
+	logger logr.Logger,
+	secret *corev1.Secret,
+	certs [][]byte,
+	key []byte,
+	certificateArn string,
+) (string, error) {
+	// Import certificate to ACM
+	logger.Info("importing cert to ACM")
+	tags := []*acm.Tag{{Key: &revisionKey, Value: &secret.ResourceVersion}}
+	// TODO: Support setting more tags
+
+	importCertInput := &acm.ImportCertificateInput{
+		Certificate: certs[0],
+		PrivateKey:  key,
+	}
+
+	if certificateArn != "" {
+		importCertInput.CertificateArn = &certificateArn
+	} else {
+		// Setting tags only supported during initial import
+		importCertInput.Tags = tags
+	}
+	if len(certs) > 1 {
+		importCertInput.CertificateChain = appendByteSlices(certs[1:])
+	}
+
+	output, err := awsAcmSvc.ImportCertificateWithContext(ctx, importCertInput)
+	if err != nil {
+		return "", fmt.Errorf("failed to import the certificate: %v", err)
+	}
+
+	if certificateArn != "" {
+		_, err := awsAcmSvc.AddTagsToCertificateWithContext(ctx, &acm.AddTagsToCertificateInput{
+			CertificateArn: &certificateArn,
+			Tags:           tags,
+		})
+		if err != nil {
+			logger.Error(err, "failed to add tags to certificate")
+		}
+	}
+	certificateArn = *output.CertificateArn
+	return certificateArn, nil
 }
 
 func (r *SecretSyncer) ingressesGetByLabels(
@@ -249,7 +268,11 @@ func main() {
 	}
 	// Set up the controller manager to cache only Secrets
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Cache:                  cache.Options{ByObject: map[client.Object]cache.ByObject{&corev1.Secret{}: {Namespaces: namespaces}}},
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Secret{}: {Namespaces: namespaces},
+			},
+		},
 		HealthProbeBindAddress: "0.0.0.0:8081",
 		Metrics:                metricsserver.Options{BindAddress: "0.0.0.0:8080"},
 		Scheme:                 scheme,
@@ -270,7 +293,11 @@ func main() {
 	check(err)
 
 	// have the controller watch secrets on the manager's cache
-	err = c.Watch(source.Kind(mgr.GetCache(), &corev1.Secret{}, &handler.TypedEnqueueRequestForObject[*corev1.Secret]{}))
+	err = c.Watch(source.Kind(
+		mgr.GetCache(),
+		&corev1.Secret{},
+		&handler.TypedEnqueueRequestForObject[*corev1.Secret]{},
+	))
 	check(err)
 
 	// start all controllers under the manager
