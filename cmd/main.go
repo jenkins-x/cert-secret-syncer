@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -120,19 +121,23 @@ func (r *SecretSyncer) Reconcile(ctx context.Context, req ctrl.Request) (result 
 				return ctrl.Result{},
 					fmt.Errorf("failed to parse ingress labels '%s': %v", ingressLabelsAsString, err)
 			}
+			if len(ingressLabels) > 0 {
+				ingresses, err := r.ingressesGetByLabels(ctx, ingressLabels)
+				if err != nil {
+					return ctrl.Result{},
+						fmt.Errorf("ingresses not found by labels '%s': %v", ingressLabelsAsString, err)
+				}
 
-			ingresses, err := r.ingressesGetByLabels(ctx, ingressLabels)
-			if err != nil {
-				return ctrl.Result{},
-					fmt.Errorf("ingresses not found by labels '%s': %v", ingressLabelsAsString, err)
-			}
-
-			for _, ingress := range ingresses.Items {
-				if ingress.Annotations[certificateArnAnnotation] != certificateArn {
-					ingress.Annotations[certificateArnAnnotation] = certificateArn
-					err = r.Update(ctx, &ingress)
-					if err != nil {
-						return ctrl.Result{}, fmt.Errorf("failed to update ingress: %v", err)
+				for _, ingress := range ingresses.Items {
+					// verify that certificateArn is in the list
+					ingCertificateAnnotation := splitCommaSeparatedString(ingress.Annotations[certificateArnAnnotation])
+					if !slices.Contains(ingCertificateAnnotation, certificateArn) {
+						ingCertificateAnnotation = append(ingCertificateAnnotation, certificateArn)
+						ingress.Annotations[certificateArnAnnotation] = strings.Join(ingCertificateAnnotation, ",")
+						err = r.Update(ctx, &ingress)
+						if err != nil {
+							return ctrl.Result{}, fmt.Errorf("failed to update ingress: %v", err)
+						}
 					}
 				}
 			}
@@ -215,7 +220,7 @@ func (r *SecretSyncer) ingressesGetByLabels(
 func (r *SecretSyncer) labelStringParse(labelString string) (map[string]string, error) {
 	labelMap := map[string]string{}
 
-	pairs := strings.Split(labelString, ",")
+	pairs := splitCommaSeparatedString(labelString)
 	for _, pair := range pairs {
 		kv := strings.Split(strings.TrimSpace(pair), "=")
 		if len(kv) != 2 {
@@ -234,6 +239,19 @@ func (r *SecretSyncer) labelStringParse(labelString string) (map[string]string, 
 
 	return labelMap, nil
 
+}
+
+func splitCommaSeparatedString(commaSeparatedString string) []string {
+	var result []string
+	parts := strings.Split(commaSeparatedString, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if len(part) == 0 {
+			continue
+		}
+		result = append(result, part)
+	}
+	return result
 }
 
 func main() {
