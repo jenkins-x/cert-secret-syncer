@@ -2,6 +2,7 @@ environments:
   default:
     values:
     - jx-values.yaml
+---
 helmDefaults:
   # time in seconds to wait for any individual Kubernetes operation (like Jobs for hooks, and waits on pod/pvc/svc/deployment readiness) (default 300)
   timeout: 600
@@ -32,3 +33,4 @@ releases:
     - "secret.jenkins-x.io/replica-source=true"
     - --to
     - '{{ requiredEnv "PREVIEW_NAMESPACE" }}'
+
